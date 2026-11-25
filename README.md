@@ -35,8 +35,9 @@ The root `vercel.json` declares two services in one Vercel project:
 | --- | --- | --- | --- |
 | `app` | `.` | Vite | `/` and frontend routes |
 | `backend` | `backend` | FastAPI | `/api/*` |
+| `blobUploads` | `blob-upload` | Express | private service binding from `backend` |
 
-The ordered rewrites route `/api/*` to FastAPI and all other paths to the Vite frontend. Select **Services** as the Vercel project framework and confirm the account has access to Vercel Services. No service bindings are needed: the browser calls the public same-domain `/api` path and the backend does not call another Vercel service. Vercel Services availability and framework support must be verified in the target account before deployment.
+The project framework is **Services**. Ordered rewrites route `/api/*` to FastAPI and all other paths to the Vite frontend. FastAPI calls the private `blobUploads` service through a Vercel service binding to create constrained, short-lived upload URLs; browsers upload image bytes directly to private Blob storage.
 
 In production, the frontend uses relative `/api` requests. `VITE_API_BASE_URL` is only a local-development override; do not place secrets in any `VITE_` variable. FastAPI routes already include `/api` once.
 
@@ -49,17 +50,16 @@ Set these on the Vercel `backend` service only, for the appropriate preview/prod
 - `SECRET_KEY` — a newly generated private signing key.
 - `ADMIN_EMAIL` and `ADMIN_PASSWORD` — private bootstrap/admin settings. Keep `ADMIN_BOOTSTRAP_ENABLED=false` when importing existing users.
 - `FRONTEND_ORIGINS` — exact HTTPS origins for the deployed frontend, comma-separated and without paths or wildcards.
-- `OBJECT_STORAGE_ENDPOINT_URL` — HTTPS S3-compatible object-storage endpoint.
-- `OBJECT_STORAGE_BUCKET` — private bucket name.
-- `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` — storage credentials and region.
+- `BLOB_STORE_ID` ? automatically added by the connected private Vercel Blob store.
+- `BLOB_UPLOAD_URL` ? automatically injected from the private Vercel service binding.
 
-Production startup fails closed if PostgreSQL or object storage configuration is missing. Use provider-issued secrets; do not put credentials in GitHub or in frontend variables.
+Production startup fails closed if PostgreSQL or private Blob configuration is missing. Use Vercel's OIDC binding; do not put credentials in GitHub or frontend variables.
 
 ## Database and image storage
 
 PostgreSQL stores accounts, role/state, analyses, notifications, original-image object references, and generated preview references. SQLite remains the local default. The existing migration script at `backend/scripts/migrate_sqlite_to_postgres.py` is retained; it is read-only against the SQLite source, defaults to dry-run, and refuses a non-empty destination. Do not run it until the target PostgreSQL database exists, is confirmed empty, and the migration has been reviewed. The original SQLite databases are not changed by deployment setup.
 
-Original uploads and generated previews use a private S3-compatible bucket, not an ephemeral Vercel filesystem or PostgreSQL BLOBs. The browser obtains a short-lived, user-scoped presigned PUT URL from authenticated FastAPI, uploads directly to object storage, then submits the object key for analysis. The API validates the user's key namespace and image when it retrieves the object. Original-image downloads and generated-preview URLs require an authenticated owner or a short-lived signed preview token. Bucket CORS must allow the exact Vercel frontend origins and `PUT` with the `Content-Type` header. Do not make the bucket public.
+Original uploads and generated previews use a private Vercel Blob store, not an ephemeral Vercel filesystem or PostgreSQL BLOBs. Authenticated FastAPI requests a short-lived, content-type and size constrained PUT URL from an internal Vercel service. The browser uploads directly to Blob storage, then submits the object key for analysis. The API validates the user's key namespace and image when it retrieves the object. Original-image downloads and generated-preview URLs require an authenticated owner or a short-lived signed preview token. Do not make the store public.
 
 The application enforces 15 MiB per image. Direct uploads avoid Vercel Function request-body limits for image bytes, but the analysis request and ordinary API responses still pass through Vercel Functions. Large paired-image processing can also encounter function memory/time limits; test representative images on a preview before production. PDF reports and original-image downloads are streamed.
 
@@ -75,7 +75,7 @@ $env:DATABASE_URL = Read-Host "PostgreSQL URL"
 python scripts/migrate_sqlite_to_postgres.py --source satquery.db
 ```
 
-Review source/target counts and the proposed records. Only after explicit approval, run the script with `--apply`; then verify users, analyses, notifications, timestamps, roles, hashes, and previews in PostgreSQL. The script never modifies or deletes the SQLite source. Existing user password hashes are retained; users may need to sign in again if the production signing key differs.
+Review source/target counts and confirm the target is empty before running the script with `--apply`; then verify users, analyses, notifications, timestamps, roles, hashes, and previews in PostgreSQL. The script never modifies or deletes the SQLite source. Existing user password hashes are retained; users may need to sign in again if the production signing key differs.
 
 ## Git and deployment
 
@@ -84,7 +84,7 @@ Review source/target counts and the proposed records. Only after explicit approv
 3. Connect the intended GitHub repository to Vercel and select the **Services** framework. Verify `app` and `backend` roots and the `/` and `/api/*` paths.
 4. Configure the backend variables above in Vercel. Configure the private object bucket's CORS policy for the deployed frontend origin.
 5. Deploy a preview first. Check health, login/registration, admin access, all three analyses, history, image retrieval, and PDF generation before production.
-6. Configure and verify an empty PostgreSQL database before considering migration. Migration is a separate, approval-gated operation.
+6. Configure and verify an empty PostgreSQL database before migrating. The migration script defaults to a read-only dry run and refuses to merge into a non-empty target.
 
 Free-service quotas, inactivity behavior, and pricing can change. Check provider terms and current quotas before creating or enabling any service. No provider account or paid plan is created by this repository configuration.
 

@@ -36,12 +36,13 @@ OBJECT_STORAGE_CONFIG={
  'access_key_id':os.getenv('OBJECT_STORAGE_ACCESS_KEY_ID',''),
  'secret_access_key':os.getenv('OBJECT_STORAGE_SECRET_ACCESS_KEY',''),
 }
-OBJECT_STORAGE_ENABLED=all(OBJECT_STORAGE_CONFIG.values())
+OBJECT_STORAGE_ENABLED=bool(os.getenv('BLOB_STORE_ID')) or all(OBJECT_STORAGE_CONFIG.values())
 if APP_ENV=='production':
  if not DATABASE_URL.startswith('postgresql+psycopg://'): raise RuntimeError('Production DATABASE_URL must use PostgreSQL')
- missing=[key for key in ('DATABASE_URL','SECRET_KEY','ADMIN_EMAIL','ADMIN_PASSWORD','FRONTEND_ORIGINS','OBJECT_STORAGE_ENDPOINT_URL','OBJECT_STORAGE_BUCKET','OBJECT_STORAGE_REGION','OBJECT_STORAGE_ACCESS_KEY_ID','OBJECT_STORAGE_SECRET_ACCESS_KEY') if not os.getenv(key)]
+ required=['DATABASE_URL','SECRET_KEY','FRONTEND_ORIGINS','BLOB_STORE_ID','BLOB_UPLOAD_URL']
+ if os.getenv('ADMIN_BOOTSTRAP_ENABLED','false').lower()=='true': required.extend(('ADMIN_EMAIL','ADMIN_PASSWORD'))
+ missing=[key for key in required if not os.getenv(key)]
  if missing: raise RuntimeError('Missing required production environment variables: '+', '.join(missing))
- if urlsplit(OBJECT_STORAGE_CONFIG['endpoint_url']).scheme!='https': raise RuntimeError('Production object storage endpoint must use HTTPS')
 engine=create_engine(DATABASE_URL,connect_args={'check_same_thread':False} if DATABASE_URL.startswith('sqlite') else {},pool_pre_ping=True)
 SessionLocal=sessionmaker(bind=engine,autoflush=False)
 Base=declarative_base(); pwd=CryptContext(schemes=['bcrypt'],deprecated='auto')
@@ -62,13 +63,23 @@ def object_store():
  global _object_store_client
  if not OBJECT_STORAGE_ENABLED: raise RuntimeError('Persistent object storage is not configured')
  if _object_store_client is None:
+  if os.getenv('BLOB_STORE_ID'):
+   from vercel.blob.sync import get_blob, put_blob
+   class VercelPrivateBlobStore:
+    def put_object(self,Bucket,Key,Body,ContentType):
+     return put_blob(Key,bytes(Body),access='private',content_type=ContentType)
+    def get_object(self,Bucket,Key):
+     result=get_blob(Key,access='private')
+     return {'Body':io.BytesIO(result.body),'ContentLength':len(result.body),'ContentType':result.metadata.content_type}
+   _object_store_client=VercelPrivateBlobStore()
+   return _object_store_client
   import boto3
   from botocore.config import Config
   _object_store_client=boto3.client('s3',endpoint_url=OBJECT_STORAGE_CONFIG['endpoint_url'],region_name=OBJECT_STORAGE_CONFIG['region'],aws_access_key_id=OBJECT_STORAGE_CONFIG['access_key_id'],aws_secret_access_key=OBJECT_STORAGE_CONFIG['secret_access_key'],config=Config(signature_version='s3v4',s3={'addressing_style':'path'}))
  return _object_store_client
 def safe_upload_key(key,user_id):
  import re
- return bool(re.fullmatch(rf'uploads/{int(user_id)}/[0-9a-f]{{32}}',key or ''))
+ return bool(re.fullmatch(rf'uploads/{int(user_id)}/[0-9a-f]{{32}}\.(?:png|jpg|jpeg|tif|tiff|webp)',key or ''))
 def stream_object(body):
  try:
   while True:
@@ -157,7 +168,17 @@ def presign_upload(v:UploadRequest,u=Depends(current)):
  if not OBJECT_STORAGE_ENABLED: raise HTTPException(503,'Direct uploads are not configured')
  if v.content_type not in ALLOWED_IMAGE_TYPES: raise HTTPException(415,'Upload PNG, JPEG, TIFF, or WebP imagery')
  if v.size<1 or v.size>MAX_UPLOAD_BYTES: raise HTTPException(413,'Maximum upload size is 15 MB')
- key=f'uploads/{u.id}/{uuid.uuid4().hex}'
+ if os.getenv('BLOB_STORE_ID'):
+  import urllib.request
+  extension={'image/png':'png','image/jpeg':'jpg','image/tiff':'tiff','image/webp':'webp'}[v.content_type]
+  key=f'uploads/{u.id}/{uuid.uuid4().hex}.{extension}'
+  payload=json.dumps({'object_key':key,'content_type':v.content_type,'size':v.size}).encode()
+  req=urllib.request.Request(os.environ['BLOB_UPLOAD_URL'].rstrip('/')+'/api/uploads/presign',data=payload,headers={'Content-Type':'application/json'},method='POST')
+  try:
+   with urllib.request.urlopen(req,timeout=10) as response: ticket=json.loads(response.read())
+  except Exception: raise HTTPException(503,'Could not prepare secure image upload')
+  return {'object_key':key,'upload_url':ticket['upload_url'],'method':'PUT','headers':{'Content-Type':v.content_type},'expires_in':300}
+ key=f'uploads/{u.id}/{uuid.uuid4().hex}.png'
  try:
   url=object_store().generate_presigned_url('put_object',Params={'Bucket':OBJECT_STORAGE_CONFIG['bucket'],'Key':key,'ContentType':v.content_type},ExpiresIn=300)
  except Exception: raise HTTPException(503,'Could not prepare secure image upload')

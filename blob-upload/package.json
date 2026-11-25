@@ -1,0 +1,10 @@
+{
+  "name": "satquery-blob-upload-service",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "@vercel/blob": "^2.3.0",
+    "express": "^5.1.0"
+  }
+}

@@ -8,7 +8,20 @@
     "backend": {
       "root": "backend",
       "framework": "fastapi",
-      "entrypoint": "app.main:app"
+      "entrypoint": "app.main:app",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "blobUploads",
+          "format": "url",
+          "env": "BLOB_UPLOAD_URL"
+        }
+      ]
+    },
+    "blobUploads": {
+      "root": "blob-upload",
+      "framework": "express",
+      "entrypoint": "index.js"
     }
   },
   "rewrites": [
