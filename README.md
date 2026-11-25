@@ -35,9 +35,9 @@ The root `vercel.json` declares two services in one Vercel project:
 | --- | --- | --- | --- |
 | `app` | `.` | Vite | `/` and frontend routes |
 | `backend` | `backend` | FastAPI | `/api/*` |
-| `blobUploads` | `blob-upload` | Express | private service binding from `backend` |
+| `blob_uploads` | `blob-upload` | Express | private service binding from `backend` |
 
-The project framework is **Services**. Ordered rewrites route `/api/*` to FastAPI and all other paths to the Vite frontend. FastAPI calls the private `blobUploads` service through a Vercel service binding to create constrained, short-lived upload URLs; browsers upload image bytes directly to private Blob storage.
+The project framework is **Services**. Ordered rewrites route `/api/*` to FastAPI and all other paths to the Vite frontend. FastAPI calls the private `blob_uploads` service through a Vercel service binding to create constrained, short-lived upload URLs; browsers upload image bytes directly to private Blob storage.
 
 In production, the frontend uses relative `/api` requests. `VITE_API_BASE_URL` is only a local-development override; do not place secrets in any `VITE_` variable. FastAPI routes already include `/api` once.
 

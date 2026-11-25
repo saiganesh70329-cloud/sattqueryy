@@ -12,13 +12,13 @@
       "bindings": [
         {
           "type": "service",
-          "service": "blobUploads",
+          "service": "blob_uploads",
           "format": "url",
           "env": "BLOB_UPLOAD_URL"
         }
       ]
     },
-    "blobUploads": {
+    "blob_uploads": {
       "root": "blob-upload",
       "framework": "express",
       "entrypoint": "index.js"
