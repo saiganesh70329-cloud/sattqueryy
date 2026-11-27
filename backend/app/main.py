@@ -11,7 +11,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, LargeBinary, UniqueConstraint, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, LargeBinary, UniqueConstraint, text, func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from reportlab.pdfgen import canvas
@@ -187,11 +187,14 @@ def token(u): return jwt.encode({'sub':str(u.id),'exp':datetime.utcnow()+timedel
 @app.post('/api/register')
 def register(v:Register,s:Session=Depends(db)):
  if len(v.password)<8: raise HTTPException(400,'Password must contain at least 8 characters')
- if s.query(User).filter_by(email=v.email).first(): raise HTTPException(409,'Email already registered')
- u=User(email=v.email,name=v.name[:80],password=pwd.hash(v.password)); s.add(u); s.commit(); s.refresh(u); return {'token':token(u),'user':{'id':u.id,'name':u.name,'email':u.email,'role':u.role}}
+ email=v.email.strip().lower()
+ if not email: raise HTTPException(400,'Email is required')
+ if s.query(User).filter(func.lower(func.trim(User.email))==email).first(): raise HTTPException(409,'Email already registered')
+ u=User(email=email,name=v.name.strip()[:80],password=pwd.hash(v.password)); s.add(u); s.commit(); s.refresh(u); return {'token':token(u),'user':{'id':u.id,'name':u.name,'email':u.email,'role':u.role}}
 @app.post('/api/login')
 def login(v:Credentials,s:Session=Depends(db)):
- u=s.query(User).filter_by(email=v.email).first()
+ email=v.email.strip().lower()
+ u=s.query(User).filter(func.lower(func.trim(User.email))==email).first()
  if not u or not u.active or not pwd.verify(v.password,u.password): raise HTTPException(401,'Email or password is incorrect')
  return {'token':token(u),'user':{'id':u.id,'name':u.name,'email':u.email,'role':u.role}}
 @app.get('/api/me')
