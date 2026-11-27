@@ -1,22 +1,24 @@
-import os, io, json, base64, uuid, secrets
+import os, io, json, base64, uuid, secrets, logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey, LargeBinary, UniqueConstraint, text, func
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from starlette.datastructures import Headers
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 ROOT=Path(__file__).resolve().parent.parent
 from dotenv import load_dotenv
@@ -27,8 +29,11 @@ def normalize_database_url(url):
  if url.startswith('postgresql://'):
   return 'postgresql+psycopg://' + url[len('postgresql://'):]
  return url
-DATABASE_URL=normalize_database_url(os.getenv('DATABASE_URL','sqlite:///./satquery.db'))
-APP_ENV=os.getenv('APP_ENV','development').lower()
+IS_VERCEL=os.getenv('VERCEL')=='1'
+DATABASE_URL=normalize_database_url(os.getenv('DATABASE_URL','sqlite://' if IS_VERCEL else 'sqlite:///./satquery.db'))
+APP_ENV=os.getenv('APP_ENV','production' if IS_VERCEL else 'development').lower()
+DATABASE_CONFIGURATION_ERROR=IS_VERCEL and not DATABASE_URL.startswith('postgresql+psycopg://')
+AUTH_CONFIGURATION_ERROR=IS_VERCEL and not os.getenv('SECRET_KEY')
 OBJECT_STORAGE_CONFIG={
  'endpoint_url':os.getenv('OBJECT_STORAGE_ENDPOINT_URL',''),
  'bucket':os.getenv('OBJECT_STORAGE_BUCKET',''),
@@ -38,12 +43,16 @@ OBJECT_STORAGE_CONFIG={
 }
 OBJECT_STORAGE_ENABLED=bool(os.getenv('BLOB_STORE_ID')) or all(OBJECT_STORAGE_CONFIG.values())
 if APP_ENV=='production':
- if not DATABASE_URL.startswith('postgresql+psycopg://'): raise RuntimeError('Production DATABASE_URL must use PostgreSQL')
  required=['DATABASE_URL','SECRET_KEY','FRONTEND_ORIGINS','BLOB_STORE_ID','BLOB_UPLOAD_URL']
  if os.getenv('ADMIN_BOOTSTRAP_ENABLED','false').lower()=='true': required.extend(('ADMIN_EMAIL','ADMIN_PASSWORD'))
+ if not DATABASE_URL.startswith('postgresql+psycopg://'): required.append('DATABASE_URL')
  missing=[key for key in required if not os.getenv(key)]
- if missing: raise RuntimeError('Missing required production environment variables: '+', '.join(missing))
-engine=create_engine(DATABASE_URL,connect_args={'check_same_thread':False} if DATABASE_URL.startswith('sqlite') else {},pool_pre_ping=True)
+ if missing:
+  if IS_VERCEL:
+   logging.getLogger(__name__).error('Missing required deployment configuration: %s', ', '.join(sorted(set(missing))))
+  else:
+   raise RuntimeError('Missing required production environment variables: '+', '.join(sorted(set(missing))))
+engine=create_engine(DATABASE_URL,connect_args={'check_same_thread':False} if DATABASE_URL.startswith('sqlite') else {},pool_pre_ping=True,hide_parameters=True)
 SessionLocal=sessionmaker(bind=engine,autoflush=False)
 Base=declarative_base(); pwd=CryptContext(schemes=['bcrypt'],deprecated='auto')
 SECRET=os.getenv('SECRET_KEY') or secrets.token_urlsafe(32); ALG='HS256'
@@ -123,9 +132,10 @@ def _preview_bytes(analysis_id,user_id,field,value):
   try: return body.read()
   finally: body.close()
  return None
-if os.getenv('SATQUERY_SKIP_SCHEMA_CREATE')!='1':
+if os.getenv('SATQUERY_SKIP_SCHEMA_CREATE')!='1' and not DATABASE_CONFIGURATION_ERROR:
  Base.metadata.create_all(engine)
 def db():
+ if DATABASE_CONFIGURATION_ERROR: raise HTTPException(503,'Account storage is unavailable. Please try again later.')
  s=SessionLocal()
  try: yield s
  finally: s.close()
@@ -140,10 +150,27 @@ def admin(u=Depends(current)):
  return u
 app=FastAPI(title='SATQUERY API',version='1.0')
 configured_origins=[origin.strip().rstrip('/') for origin in os.getenv('FRONTEND_ORIGINS','').split(',') if origin.strip()]
+if not configured_origins and IS_VERCEL and os.getenv('VERCEL_URL'):
+ configured_origins=['https://'+os.environ['VERCEL_URL'].strip().rstrip('/')]
 if not configured_origins and APP_ENV!='production': configured_origins=['http://localhost:5173','http://127.0.0.1:5173','http://localhost:5174','http://127.0.0.1:5174']
 if APP_ENV=='production' and any(origin=='*' or urlsplit(origin).scheme!='https' or not urlsplit(origin).netloc or urlsplit(origin).path or urlsplit(origin).query or urlsplit(origin).fragment for origin in configured_origins):
  raise RuntimeError('Production FRONTEND_ORIGINS must contain exact HTTPS origins without paths or wildcards')
 app.add_middleware(CORSMiddleware,allow_origins=configured_origins,allow_methods=['GET','POST','PATCH'],allow_headers=['Authorization','Content-Type'],expose_headers=['Content-Disposition'])
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request:Request,exc:StarletteHTTPException):
+ return JSONResponse(status_code=exc.status_code,content={'detail':exc.detail},headers=exc.headers)
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request:Request,exc:RequestValidationError):
+ errors=[{'loc':error.get('loc',[]),'msg':error.get('msg','Invalid value'),'type':error.get('type','value_error')} for error in exc.errors()]
+ return JSONResponse(status_code=422,content={'detail':errors})
+@app.exception_handler(SQLAlchemyError)
+async def database_exception_handler(request:Request,exc:SQLAlchemyError):
+ logging.getLogger(__name__).exception('Database operation failed for %s %s',request.method,request.url.path)
+ return JSONResponse(status_code=503,content={'detail':'Account storage is temporarily unavailable. Please try again later.'})
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request:Request,exc:Exception):
+ logging.getLogger(__name__).exception('Unhandled API exception for %s %s',request.method,request.url.path)
+ return JSONResponse(status_code=500,content={'detail':'The request could not be completed. Please try again later.'})
 @app.on_event('startup')
 def startup():
  if APP_ENV=='production' and os.getenv('ADMIN_BOOTSTRAP_ENABLED','false').lower()!='true': return
@@ -156,6 +183,7 @@ class Register(Credentials): name:str
 class UploadRequest(BaseModel): filename:str; content_type:str; size:int
 @app.get('/api/health')
 def health():
+ if DATABASE_CONFIGURATION_ERROR: raise HTTPException(503,'Account storage is unavailable. Please try again later.')
  try:
   with engine.connect() as connection: connection.execute(text('SELECT 1'))
  except SQLAlchemyError:
@@ -186,13 +214,27 @@ def presign_upload(v:UploadRequest,u=Depends(current)):
 def token(u): return jwt.encode({'sub':str(u.id),'exp':datetime.utcnow()+timedelta(hours=12)},SECRET,algorithm=ALG)
 @app.post('/api/register')
 def register(v:Register,s:Session=Depends(db)):
+ if AUTH_CONFIGURATION_ERROR: raise HTTPException(503,'Account service is unavailable. Please try again later.')
  if len(v.password)<8: raise HTTPException(400,'Password must contain at least 8 characters')
+ if len(v.password.encode('utf-8'))>72: raise HTTPException(400,'Password must be 72 bytes or fewer')
  email=v.email.strip().lower()
  if not email: raise HTTPException(400,'Email is required')
  if s.query(User).filter(func.lower(func.trim(User.email))==email).first(): raise HTTPException(409,'Email already registered')
- u=User(email=email,name=v.name.strip()[:80],password=pwd.hash(v.password)); s.add(u); s.commit(); s.refresh(u); return {'token':token(u),'user':{'id':u.id,'name':u.name,'email':u.email,'role':u.role}}
+ name=v.name.strip()
+ if not name: raise HTTPException(400,'Name is required')
+ u=User(email=email,name=name[:80],password=pwd.hash(v.password)); s.add(u)
+ try: s.commit()
+ except IntegrityError:
+  s.rollback()
+  if s.query(User).filter(func.lower(func.trim(User.email))==email).first(): raise HTTPException(409,'Email already registered')
+  raise
+ except SQLAlchemyError:
+  s.rollback()
+  raise
+ s.refresh(u); return {'token':token(u),'user':{'id':u.id,'name':u.name,'email':u.email,'role':u.role}}
 @app.post('/api/login')
 def login(v:Credentials,s:Session=Depends(db)):
+ if AUTH_CONFIGURATION_ERROR: raise HTTPException(503,'Account service is unavailable. Please try again later.')
  email=v.email.strip().lower()
  u=s.query(User).filter(func.lower(func.trim(User.email))==email).first()
  if not u or not u.active or not pwd.verify(v.password,u.password): raise HTTPException(401,'Email or password is incorrect')

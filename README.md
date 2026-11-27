@@ -41,9 +41,9 @@ The project framework is **Services**. Ordered rewrites route `/api/*` to FastAP
 
 In production, the frontend uses relative `/api` requests. `VITE_API_BASE_URL` is only a local-development override; do not place secrets in any `VITE_` variable. FastAPI routes already include `/api` once.
 
-## Production environment variables
+## Hosted environment variables
 
-Set these on the Vercel `backend` service only, for the appropriate preview/production environments. Never commit actual values:
+Set these on the Vercel `backend` service for both Preview and Production deployments. Vercel function filesystems are read-only and temporary, so SQLite is for local development only. Never commit actual values:
 
 - `APP_ENV=production`
 - `DATABASE_URL` — PostgreSQL URL. PostgreSQL is mandatory in production; SQLite remains for local development.
@@ -53,7 +53,7 @@ Set these on the Vercel `backend` service only, for the appropriate preview/prod
 - `BLOB_STORE_ID` ? automatically added by the connected private Vercel Blob store.
 - `BLOB_UPLOAD_URL` ? automatically injected from the private Vercel service binding.
 
-Production startup fails closed if PostgreSQL or private Blob configuration is missing. Use Vercel's OIDC binding; do not put credentials in GitHub or frontend variables.
+Hosted deployments use PostgreSQL and a stable `SECRET_KEY`; missing database or signing-key configuration disables account operations rather than falling back to SQLite or an unstable key. Production startup also requires private Blob configuration. Use Vercel's OIDC binding; do not put credentials in GitHub or frontend variables.
 
 ## Database and image storage
 
